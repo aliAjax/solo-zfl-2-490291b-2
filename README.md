@@ -1,57 +1,53 @@
-# React + TypeScript + Vite
+# 键盘声学实验室 · 批次追溯台
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+离线优先的键盘声学实验室批次管理系统（Vite + React + TypeScript + Tailwind + Zustand）。
+管理**样机、轴体批次、润滑配方、测试机位、盲测场次**，批次按
+**排队 → 测听 → 复测 → 评审 → 放行**流转，异常进入**隔离**。
 
-Currently, two official plugins are available:
+## 启动
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default tseslint.config({
-  extends: [
-    // Remove ...tseslint.configs.recommended and replace with this
-    ...tseslint.configs.recommendedTypeChecked,
-    // Alternatively, use this for stricter rules
-    ...tseslint.configs.strictTypeChecked,
-    // Optionally, add this for stylistic rules
-    ...tseslint.configs.stylisticTypeChecked,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+```bash
+npm install
+npm run dev          # 开发
+npm run build        # 类型检查 + 生产构建
+npm run preview      # 预览生产构建（默认 http://127.0.0.1:4173）
+npm run e2e          # 真实浏览器端到端（先 build + preview，再跑 Playwright）
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## 角色（权限分离）
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+| 角色 | 主要权限 |
+| --- | --- |
+| 管理员 admin | 全部 |
+| 排程员 scheduler | 建批/改批、预约、机位校准、配方/样机/轴体台账、流转 |
+| 测试员 tester | 录入测量、盲测投票（不得投自装样机） |
+| 评审员 reviewer | 创建盲测场次、维护评审团、录入评审结论、放行 |
 
-export default tseslint.config({
-  extends: [
-    // other configs...
-    // Enable lint rules for React
-    reactX.configs['recommended-typescript'],
-    // Enable lint rules for React DOM
-    reactDom.configs.recommended,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
-```
+右上角可随时切换当前身份；越权动作被拒绝并写审计。
+
+## 核心规则
+
+- **阶段闸门**：建批→排队；→测听需有有效润滑配方且批次已预约到**已校准机位**；→评审需有**盲测场次 + 脱敏样本 + 非空评审团（不含装机人）**；→放行需评审通过且盲测投票 ≥ 2 且无装机人自评票。缺配方/校准/盲测样本均不能推进。
+- **资源不重叠**：同一机位或同一样机的预约时段不可重叠，冲突时提交按钮禁用，强提也整体失败。
+- **自评禁止**：测试员不能评估/投票给自装样机；装机人无法被加入该批次评审团。
+- **声压异常**：峰值声压超出 38–66 dB 自动**隔离批次**，并在同一事务撤销该批次全部预约、回退对应耗材台账、发广播通知。
+- **复测失败**：判失败即隔离，同样整单回滚。
+- **事务/回滚**：所有动作在结构化克隆的草稿上执行，任何一步抛错（权限、冲突、闸门、未校准……）都丢弃草稿、业务数据零改动，仅留一条“已整单回滚”审计。
+- **撤销/重做**：成功动作入历史栈（Ctrl/Cmd+Z、Ctrl+Shift+Z / Ctrl+Y），失败动作不入栈。
+- **离线 + 双页合并**：在线时跨标签经 `localStorage` 的 `storage` 事件实时合并；离线改动进本页队列，恢复在线或手动“刷新”时裁决。
+  - 标量字段按字段逻辑时钟 **LWW**（平局用户 id 决胜），逐字段出裁决记录；
+  - 集合实体 union，删除用**带时钟墓碑**裁决（更高版本写入可复活）；
+  - **测量按 `dedupKey` 幂等，同场次重复测量只吸收一次**。
+- **导入拦截**：校验魔数、结构、类型、id/字段名字符集、字符串长度、体量上限、`<script>` 等可执行标记与 `__proto__/constructor/prototype` 原型污染键；任一不合规整体拒绝、零应用。
+
+## 页面
+
+流程看板（六列泳道 + 批次抽屉实况闸门）· 资源台账（轴体/配方/样机/机位校准）·
+预约机位（冲突预览 + 耗材台账）· 测听记录（异常自动隔离 + 幂等键 + 复测失败）·
+盲测场次（脱敏样本/评审团/投票）· 合并裁决（逐字段裁决报告）· 审计日志/通知。
+
+## 端到端走通的七大场景
+
+`e2e/spec.mjs`（真实 Chromium，Playwright）：建批与缺配方拦截、资源冲突、盲测越权、
+异常隔离、失败整单回滚、双页字段合并（重复测量只吸收一次）、导入导出与恶意导入拦截。
+页面暴露 `window.__kacl`（store / 纯函数引擎 / 合并 / 导入解析）以便自检，无后端依赖。
