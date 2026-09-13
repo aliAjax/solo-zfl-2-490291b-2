@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useStore } from '../store/useStore'
-import { DB_MAX, DB_MIN, isAnomalous, can } from '../lib/rules'
+import { DB_MAX, DB_MIN, isAnomalous, can, measurementBlockers } from '../lib/rules'
 import { Badge, Btn, Card, EmptyState, Field, Input, Select } from './ui'
 import { fmtTime, stationName, userName } from '../lib/lookups'
 
@@ -20,6 +20,7 @@ export function MeasureView() {
   const abnormal = isAnomalous({ pressureDb: Number(pressureDb) })
   const station = s.stations.find((x) => x.id === stationId)
   const alreadySeen = s.dedup[dedupKey] !== undefined
+  const gate = measurementBlockers(s, { batchId, stationId, testerId: actor?.id ?? '' })
 
   const submit = () =>
     act({
@@ -54,11 +55,15 @@ export function MeasureView() {
               <Input data-testid="ms-dedup" value={dedupKey} onChange={(e) => setDedupKey(e.target.value)} />
             </Field>
 
-            {alreadySeen && <div className="rounded-lg border border-slateblue-500/50 bg-slateblue-500/10 px-3 py-2 text-xs text-slateblue-400">ℹ 该幂等键已存在，再次提交将被吸收（只保留一次测量）。</div>}
-            {abnormal && <div className="rounded-lg border border-wine-600/50 bg-wine-600/10 px-3 py-2 text-xs text-wine-400">⛔ 声压异常：提交后将自动隔离该批次，撤销预约并回退耗材（同一事务）。</div>}
-            {!abnormal && !alreadySeen && station?.calibrated && <div className="rounded-lg border border-moss-600/40 bg-moss-600/10 px-3 py-2 text-xs text-moss-400">✓ 声压正常、机位已校准。</div>}
+            {gate.blocked ? (
+              <div data-testid="ms-gate" className="rounded-lg border border-wine-600/50 bg-wine-600/10 px-3 py-2 text-xs text-wine-400">
+                ⛔ {gate.reasons.join('；')}
+              </div>
+            ) : alreadySeen ? <div className="rounded-lg border border-slateblue-500/50 bg-slateblue-500/10 px-3 py-2 text-xs text-slateblue-400">ℹ 该幂等键已存在，再次提交将被吸收（只保留一次测量）。</div>
+            : abnormal ? <div className="rounded-lg border border-wine-600/50 bg-wine-600/10 px-3 py-2 text-xs text-wine-400">⛔ 声压异常：提交后将自动隔离该批次，撤销预约并回退耗材（同一事务）。</div>
+            : <div className="rounded-lg border border-moss-600/40 bg-moss-600/10 px-3 py-2 text-xs text-moss-400">✓ 阶段/机位/有效预约均满足，可记录测量。</div>}
 
-            <Btn data-testid="ms-submit" variant="gold" className="w-full justify-center" disabled={!canMeasure || !station?.calibrated} onClick={submit}>提交测量</Btn>
+            <Btn data-testid="ms-submit" variant="gold" className="w-full justify-center" disabled={!canMeasure || gate.blocked} onClick={submit}>提交测量</Btn>
 
             <div className="border-t border-ink-700 pt-3">
               <Field label="复测失败原因"><Input value={reason} onChange={(e) => setReason(e.target.value)} /></Field>

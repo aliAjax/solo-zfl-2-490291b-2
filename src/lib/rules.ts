@@ -35,17 +35,51 @@ export const deny = (...reasons: string[]): BlockResult => ({
   reasons,
 })
 
+/** 严格解析日期；非法/无法解析返回 null（避免 NaN 静默通过） */
 function overlaps(aStart: string, aEnd: string, bStart: string, bEnd: string) {
   return new Date(aStart) < new Date(bEnd) && new Date(bStart) < new Date(aEnd)
 }
 
-/** 机位或样机时段不能重叠（返回冲突预约） */
+export function parseDate(value: unknown): Date | null {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+export interface BookingCandidateLike {
+  batchId: string
+  prototypeId: string
+  stationId: string
+  testerId: string
+  start: string
+  end: string
+}
+
+/** 预约时段与引用完整性校验：坏日期 / 不存在实体一律给出原因 */
+export function bookingValidationErrors(state: AppState, c: BookingCandidateLike): string[] {
+  const reasons: string[] = []
+  const start = parseDate(c.start)
+  const end = parseDate(c.end)
+  if (!start) reasons.push('开始时间无效或无法解析')
+  if (!end) reasons.push('结束时间无效或无法解析')
+  if (start && end && end <= start) reasons.push('结束时间必须晚于开始时间')
+  if (!state.batches.some((b) => b.id === c.batchId)) reasons.push('批次不存在')
+  if (!state.prototypes.some((p) => p.id === c.prototypeId)) reasons.push('样机不存在')
+  if (!state.stations.some((st) => st.id === c.stationId)) reasons.push('机位不存在')
+  if (!state.users.some((u) => u.id === c.testerId && u.role === 'tester'))
+    reasons.push('测试员不存在或不是测试员角色')
+  return reasons
+}
+
+/** 机位或样机时段不能重叠（返回冲突预约）；无效时段不产生匹配（由完整性校验拦截） */
 export function findBookingConflict(
   state: AppState,
-  candidate: Omit<Booking, 'id' | 'createdAt'>,
+  candidate: BookingCandidateLike,
   ignoreId?: string,
 ): Booking | null {
-  if (new Date(candidate.end) <= new Date(candidate.start)) return null
+  const start = parseDate(candidate.start)
+  const end = parseDate(candidate.end)
+  if (!start || !end || end <= start) return null
   for (const b of state.bookings) {
     if (b.id === ignoreId) continue
     if (b.stationId !== candidate.stationId && b.prototypeId !== candidate.prototypeId)
@@ -61,6 +95,35 @@ export const isAnomalous = (m: Pick<Measurement, 'pressureDb'>) =>
 /** 测试员是否为该样机的装机人（自装样机不得自评） */
 export const isSelfAssembled = (state: AppState, protoId: string, testerId: string) =>
   state.prototypes.find((p) => p.id === protoId)?.assembledBy === testerId
+
+/**
+ * 测量前置校验：
+ * - 批次存在且处于测听/复测阶段（排队等阶段不能记录）
+ * - 机位存在且已校准
+ * - 必须有“批次 + 机位 + 测试员”匹配的有效预约
+ */
+export function measurementBlockers(
+  state: AppState,
+  p: { batchId: string; stationId: string; testerId: string },
+): BlockResult {
+  const b = state.batches.find((x) => x.id === p.batchId)
+  if (!b) return deny('批次不存在')
+  const reasons: string[] = []
+  if (!['listening', 'retest'].includes(b.stage)) {
+    const stageName: Record<string, string> = { queued: '排队', listening: '测听', retest: '复测', review: '评审', released: '放行', quarantined: '隔离' }
+    reasons.push(`批次当前为“${stageName[b.stage]}”阶段，仅测听/复测阶段可记录测量`)
+  }
+  const station = state.stations.find((x) => x.id === p.stationId)
+  if (!station) reasons.push('测量机位不存在')
+  else if (!station.calibrated) reasons.push('测量机位未校准')
+  if (!state.users.some((u) => u.id === p.testerId && u.role === 'tester'))
+    reasons.push('测试员不存在或不是测试员角色')
+  const hasBooking = state.bookings.some(
+    (bk) => bk.batchId === p.batchId && bk.stationId === p.stationId && bk.testerId === p.testerId,
+  )
+  if (!hasBooking) reasons.push('没有与该批次/机位/测试员匹配的有效预约，不能记录测量')
+  return deny(...reasons)
+}
 
 function batchBlindSession(state: AppState, batchId: string) {
   return state.sessions.find((s) => s.batchId === batchId)

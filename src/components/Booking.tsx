@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useStore } from '../store/useStore'
-import { can, findBookingConflict } from '../lib/rules'
+import { can, bookingValidationErrors, findBookingConflict } from '../lib/rules'
 import { Badge, Btn, Card, EmptyState, Field, Input, Select } from './ui'
 import { fmtTime, fromLocalInput, stationName, toLocalInput, userName } from '../lib/lookups'
 
@@ -33,7 +33,18 @@ export function BookingView() {
     batchId, stationId, prototypeId, testerId,
     start: fromLocalInput(start), end: fromLocalInput(end), purpose,
   }
-  const conflict = canBook ? findBookingConflict(s, candidate) : null
+  // datetime-local 非法（如清空）时 fromLocalInput 得到 Invalid Date
+  const rawStartOk = start !== '' && !Number.isNaN(new Date(start).getTime())
+  const rawEndOk = end !== '' && !Number.isNaN(new Date(end).getTime())
+  const refErrors = bookingValidationErrors(s, candidate).filter(
+    (r) => !r.includes('开始时间') && !r.includes('结束时间'),
+  )
+  const dateErrors: string[] = []
+  if (!rawStartOk) dateErrors.push('开始时间无效或无法解析')
+  if (!rawEndOk) dateErrors.push('结束时间无效或无法解析')
+  if (rawStartOk && rawEndOk && new Date(end) <= new Date(start)) dateErrors.push('结束时间必须晚于开始时间')
+  const invalid = [...dateErrors, ...refErrors]
+  const conflict = canBook && invalid.length === 0 ? findBookingConflict(s, candidate) : null
   const station = s.stations.find((x) => x.id === stationId)
 
   const submit = () =>
@@ -79,8 +90,12 @@ export function BookingView() {
               <Field label="数量"><Input data-testid="bk-qty" type="number" value={qty} onChange={(e) => setQty(Number(e.target.value))} /></Field>
             </div>
 
-            {conflict ? (
-              <div className="rounded-lg border border-wine-600/50 bg-wine-600/10 px-3 py-2 text-xs text-wine-400">
+            {invalid.length > 0 ? (
+              <div data-testid="bk-invalid" className="rounded-lg border border-wine-600/50 bg-wine-600/10 px-3 py-2 text-xs text-wine-400">
+                ⛔ {invalid.join('；')}
+              </div>
+            ) : conflict ? (
+              <div data-testid="bk-conflict" className="rounded-lg border border-wine-600/50 bg-wine-600/10 px-3 py-2 text-xs text-wine-400">
                 ⛔ 资源冲突：与既有预约时段重叠（机位/样机同一资源不可重叠）。提交将被拒绝并整单回滚。
                 <div className="mt-1 text-ink-500">冲突预约 {conflict.id.slice(0, 10)} · {stationName(s, conflict.stationId)} · {userName(s, conflict.testerId)}</div>
               </div>
@@ -89,10 +104,10 @@ export function BookingView() {
                 ⚠ 该机位校准失效：可以预约，但批次无法推进到测听。
               </div>
             ) : (
-              <div className="rounded-lg border border-moss-600/40 bg-moss-600/10 px-3 py-2 text-xs text-moss-400">✓ 时段无冲突，可预约（将一并出库耗材）</div>
+              <div className="rounded-lg border border-moss-600/40 bg-moss-600/10 px-3 py-2 text-xs text-moss-400">✓ 时段与引用均合法、无冲突，可预约（将一并出库耗材）</div>
             )}
 
-            <Btn data-testid="bk-submit" variant="gold" className="w-full justify-center" disabled={!canBook || !!conflict} onClick={submit}>
+            <Btn data-testid="bk-submit" variant="gold" className="w-full justify-center" disabled={!canBook || invalid.length > 0 || !!conflict} onClick={submit}>
               预约并出库耗材
             </Btn>
             {!canBook && <div className="text-center text-[11px] text-ink-500">仅排程员可预约</div>}

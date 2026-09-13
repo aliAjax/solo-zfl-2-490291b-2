@@ -144,6 +144,17 @@ export interface ResolvedField {
   reason: string
 }
 
+export interface VoteConflict {
+  sessionId: string
+  sessionCode: string
+  testerId: string
+  /** 保留的票 */
+  keptRating: number
+  /** 被拦截/未覆盖的分叉票 */
+  droppedRating: number
+  reason: string
+}
+
 export interface MergeReport {
   at: string
   withTab: string
@@ -151,6 +162,8 @@ export interface MergeReport {
   addedEntities: string[]
   removedTombstones: string[]
   duplicateMeasurements: string[]
+  /** 同一测试员在两个分叉页各投一票：先投保留、后投拦截，不静默覆盖 */
+  voteConflicts: VoteConflict[]
   summary: string
 }
 

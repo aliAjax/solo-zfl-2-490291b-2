@@ -1,4 +1,4 @@
-import type { AppState, MergeReport, ResolvedField } from '../types/domain'
+import type { AppState, MergeReport, ResolvedField, Vote, VoteConflict } from '../types/domain'
 
 function scalarFields(o: Record<string, unknown>): string[] {
   return Object.keys(o).filter(
@@ -47,6 +47,7 @@ export function mergeStates(
   const addedEntities: string[] = []
   const removedTombstones: string[] = []
   const duplicateMeasurements: string[] = []
+  const voteConflicts: VoteConflict[] = []
 
   out.clock = Math.max(local.clock, remote.clock)
 
@@ -108,12 +109,64 @@ export function mergeStates(
       }
       for (const key of Object.keys(rEnt)) {
         if (!Array.isArray(rEnt[key])) continue
+        // votes/panel/sampleCodes 由盲测场次专用裁决处理（不同测试员的票必须并存）
+        if (coll === 'sessions') continue
         const lf = local.fieldMeta[`${id}.${key}`]
         const rf = remote.fieldMeta[`${id}.${key}`]
         if ((rf?.v ?? -1) > (lf?.v ?? -1)) lEnt[key] = structuredClone(rEnt[key])
       }
     }
     ;(out[coll] as unknown) = [...merged.values()]
+  }
+
+  // ---- 盲测场次：票按测试员并集；同人分叉投票检测冲突，先投保留、后投拦截 ----
+  const voteAt = (v: Vote) => {
+    const t = new Date(v.at).getTime()
+    return Number.isNaN(t) ? 0 : t
+  }
+  for (const rSes of remote.sessions) {
+    const lSes = out.sessions.find((x) => x.id === rSes.id)
+    if (!lSes) continue // 新建场次已在 union 阶段加入；被墓碑删除的场次跳过
+    // 评审团 / 样本：按成员并集（不漏掉任一页新增成员或样本）
+    lSes.panel = Array.from(new Set([...lSes.panel, ...rSes.panel]))
+    lSes.sampleCodes = Array.from(new Set([...lSes.sampleCodes, ...rSes.sampleCodes]))
+
+    const localHasVote = (testerId: string) => lSes.votes.some((v) => v.testerId === testerId)
+    for (const rv of rSes.votes) {
+      if (!localHasVote(rv.testerId)) {
+        // 不同测试员的合法票：双方都保留
+        lSes.votes = [...lSes.votes, structuredClone(rv)]
+        continue
+      }
+      const lv = lSes.votes.find((v) => v.testerId === rv.testerId)!
+      // 同票（内容一致）幂等吸收；不同票=同人分叉重复投票，拦截后投
+      if (lv.rating === rv.rating && lv.comment === rv.comment) continue
+      const lvAt = voteAt(lv)
+      const rvAt = voteAt(rv)
+      if (rvAt >= lvAt) {
+        // 远程是后投：保持本地先投，记录冲突
+        voteConflicts.push({
+          sessionId: rSes.id,
+          sessionCode: rSes.code,
+          testerId: rv.testerId,
+          keptRating: lv.rating,
+          droppedRating: rv.rating,
+          reason: `同一测试员分叉投票：先投 ${lv.rating} 保留，后投 ${rv.rating} 拦截（不静默覆盖）`,
+        })
+      } else {
+        // 远程更早：以远程先投为准，本地后投计入冲突
+        voteConflicts.push({
+          sessionId: rSes.id,
+          sessionCode: rSes.code,
+          testerId: rv.testerId,
+          keptRating: rv.rating,
+          droppedRating: lv.rating,
+          reason: `同一测试员分叉投票：先投 ${rv.rating} 保留，后投 ${lv.rating} 拦截（不静默覆盖）`,
+        })
+        lSes.votes = lSes.votes.map((v) => (v.testerId === rv.testerId ? structuredClone(rv) : v))
+      }
+    }
+    lSes.votes.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
   }
 
   // ---- 应用墓碑删除 ----
@@ -153,7 +206,8 @@ export function mergeStates(
 
   const summary =
     `逐字段裁决 ${changedScalars.length} 项；新增实体 ${addedEntities.length}；` +
-    `墓碑删除 ${[...new Set(removedTombstones)].length}；重复测量吸收 ${duplicateMeasurements.length} 条`
+    `墓碑删除 ${[...new Set(removedTombstones)].length}；重复测量吸收 ${duplicateMeasurements.length} 条；` +
+    `盲测重复投票拦截 ${voteConflicts.length} 票`
 
   return {
     state: out,
@@ -162,6 +216,7 @@ export function mergeStates(
       addedEntities,
       removedTombstones: [...new Set(removedTombstones)],
       duplicateMeasurements,
+      voteConflicts,
       summary,
     },
   }

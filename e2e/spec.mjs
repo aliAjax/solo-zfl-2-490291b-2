@@ -238,11 +238,16 @@ await test('场景5 失败回滚：权限不足/校准失效/事务内抛错全�
   assert.equal(s.batches.length, s0.batches.length, '测试员建批必须被拒')
   assert.ok(s.audit.some(a => !a.ok && a.detail.includes('权限不足')), '审计记录权限不足')
 
-  // 未校准机位不能测量（选择 BENCH-C 后提交按钮禁用；引擎也拒绝）
+  // 排队阶段 + 未校准机位 + 无预约：测量必须被拒（多重原因），零写入
   await switchUser(page, 'u_t2')
+  const measBefore = await state(page)
   await act(page, { type: 'measure.record', p: { dedupKey: 'k-uncal', batchId: 'b_1', stationId: 'st_c', pressureDb: 50, thockScore: 70, clicks: 1 } })
   s = await state(page)
-  assert.ok(!s.measurements.some(m => m.dedupKey === 'k-uncal'), '未校准机位测量必须回滚')
+  assert.ok(!s.measurements.some(m => m.dedupKey === 'k-uncal'), '未校准/排队/无预约的测量必须回滚')
+  const failAudit = s.audit.find(a => !a.ok && a.detail.includes('k-uncal') === false && a.detail.includes('未校准'))
+  assert.ok(s.audit.some(a => !a.ok && (a.detail.includes('未校准') || a.detail.includes('排队'))), '失败审计需说明未校准/排队原因')
+  assert.equal(s.measurements.length, measBefore.measurements.length, '测量状态保持不变')
+  void failAudit
 
   // 冲突预约零改动（同场景2引擎路径）
   await switchUser(page, 'u_sched')
@@ -290,51 +295,100 @@ await test('场景6 双页合并：逐字段LWW、重复测量只吸收一次、
   assert.equal(s.batches.find(x => x.id === 'b_2').note, 'B页给B002备注', '不同字段应合并保留')
   assert.ok(s.lastMerge, '应生成合并裁决报告')
 
-  // 同场次重复测量：两页分别提交相同 dedupKey，仅吸收一次
-  await switchUser(page, 'u_t2')
-  await act(page, { type: 'booking.create', p: {
-    batchId: 'b_1', stationId: 'st_a', prototypeId: 'p_alpha', testerId: 'u_t2',
-    start: new Date(SLOT3.s).toISOString(), end: new Date(SLOT3.e).toISOString(), purpose: 'm', consumable: { item: 'Z', qty: 1 } } })
-  await act(page, { type: 'batch.transition', id: 'b_1', target: 'listening' })
-  await act(page, { type: 'measure.record', p: { dedupKey: 'SAME-SESSION-KEY-1', batchId: 'b_1', stationId: 'st_a', pressureDb: 52, thockScore: 80, clicks: 50 } })
-  // B 页也提交同一幂等键（在 A 已广播后 B 拉取到，再提交 => 同页吸收提示，不新增）
-  await pageB.waitForTimeout(150)
+  // ===== 两个离线页对同一场次投票：不同测试员的票合并后双方保留 =====
+  // 在线先由评审员建好盲测场次（评审团含 u_t2、u_t3），并让两页都同步到
+  await page.evaluate(() => window.__kacl.useStore.getState().refresh())
+  await pageB.evaluate(() => window.__kacl.useStore.getState().refresh())
+  await switchUser(page, 'u_rev')
+  await act(page, { type: 'session.create', p: { batchId: 'b_1', sampleCodes: ['S-01', 'S-02'], panel: ['u_t2', 'u_t3'] } })
+  await page.waitForTimeout(150)
   await pageB.evaluate(() => window.__kacl.useStore.getState().refresh())
   await pageB.waitForTimeout(150)
-  const dupAdded = await pageB.evaluate(() => {
-    const st = window.__kacl
-    const before = st.useStore.getState().state.measurements.length
-    // 直接以 tester 身份调用
-    st.useStore.setState({ state: { ...st.useStore.getState().state, currentUserId: 'u_t2' } })
-    st.useStore.getState().act({ type: 'measure.record', p: { dedupKey: 'SAME-SESSION-KEY-1', batchId: 'b_1', stationId: 'st_a', pressureDb: 52, thock: 80, thockScore: 80, clicks: 50 } })
-    return st.useStore.getState().state.measurements.length - before
-  })
-  assert.equal(dupAdded, 0, '重复测量必须只吸收一次（不新增）')
+  s = await state(page)
+  const sesId = s.sessions.find(x => x.batchId === 'b_1').id
 
-  // 纯函数层：验证跨页真正分叉时 dedup 去重与逐字段裁决统计
+  // 两页都切到离线（改动各自进本页 outbox，不实时广播）
+  await page.evaluate(() => window.__kacl.useStore.getState().setOnline(false))
+  await pageB.evaluate(() => window.__kacl.useStore.getState().setOnline(false))
+  // A 页：u_t2 投 80；B 页：u_t3 投 91（不同测试员，合法分叉）
+  await page.evaluate(() => window.__kacl.useStore.getState().switchUser('u_t2'))
+  await pageB.evaluate(() => window.__kacl.useStore.getState().switchUser('u_t3'))
+  await page.evaluate((id) => window.__kacl.useStore.getState().act({ type: 'session.vote', id, rating: 80, comment: 'A页-t2' }), sesId)
+  await pageB.evaluate((id) => window.__kacl.useStore.getState().act({ type: 'session.vote', id, rating: 91, comment: 'B页-t3' }), sesId)
+  // A 恢复在线：本页 outbox 与共享文档裁决；再让 B 恢复并刷新，最终两票必须都在
+  await page.evaluate(() => window.__kacl.useStore.getState().setOnline(true))
+  await page.waitForTimeout(200)
+  await pageB.evaluate(() => window.__kacl.useStore.getState().setOnline(true))
+  await pageB.waitForTimeout(150)
+  await pageB.evaluate(() => window.__kacl.useStore.getState().refresh())
+  await page.waitForTimeout(150)
+  await page.evaluate(() => window.__kacl.useStore.getState().refresh())
+  await page.waitForTimeout(200)
+  s = await state(page)
+  let mergedSes = s.sessions.find(x => x.id === sesId)
+  const t2vote = mergedSes.votes.find(v => v.testerId === 'u_t2')
+  const t3vote = mergedSes.votes.find(v => v.testerId === 'u_t3')
+  assert.ok(t2vote && t2vote.rating === 80, '离线分叉：测试员 t2 的票必须保留')
+  assert.ok(t3vote && t3vote.rating === 91, '离线分叉：测试员 t3 的票必须保留（双方并存）')
+  assert.equal(mergedSes.votes.length, 2, '不同测试员两票合并后仍为 2 票')
+  assert.equal(s.lastMerge?.voteConflicts?.length ?? 0, 0, '不同测试员不应产生重复投票冲突')
+
+  // ===== 同一测试员在两个离线页各投不同票：先投保留、后投拦截，不静默覆盖 =====
+  const voteConflict = await page.evaluate(() => {
+    const K = window.__kacl
+    const base = K.seedState('base')
+    // 公共准备：评审员建场次（panel 含 u_t2）
+    let x = K.dispatch(base, { type: 'user.set', userId: 'u_rev' }).state
+    x = K.dispatch(x, { type: 'session.create', p: { batchId: 'b_1', sampleCodes: ['S-01'], panel: ['u_t2'] } }).state
+    const sid = x.sessions[0].id
+    // 从同一基点分叉
+    let a = structuredClone(x)
+    let b = structuredClone(x)
+    a = K.dispatch(a, { type: 'user.set', userId: 'u_t2' }).state
+    b = K.dispatch(b, { type: 'user.set', userId: 'u_t2' }).state
+    a = K.dispatch(a, { type: 'session.vote', id: sid, rating: 70, comment: 'first' }).state
+    // 制造时间先后：把 A 的票时间提前
+    const va = a.sessions[0].votes.find(v => v.testerId === 'u_t2')
+    va.at = '2026-01-01T00:00:00.000Z'
+    const rb = K.dispatch(b, { type: 'session.vote', id: sid, rating: 99, comment: 'second' }).state
+    const m = K.mergeStates(a, rb)
+    const votes = m.state.sessions.find(z => z.id === sid).votes.filter(v => v.testerId === 'u_t2')
+    return { count: votes.length, kept: votes[0]?.rating, conflicts: m.report.voteConflicts }
+  })
+  assert.equal(voteConflict.count, 1, '同人重复投票合并后只能有 1 票')
+  assert.equal(voteConflict.kept, 70, '先投 70 必须保留，99 被拦截')
+  assert.equal(voteConflict.conflicts.length, 1, '裁决报告必须记录 1 条重复投票冲突')
+  assert.ok(voteConflict.conflicts[0].reason.includes('不静默覆盖'))
+
+  // ===== 纯函数层：跨页真正分叉时测量 dedup 去重与逐字段裁决 =====
   const mergeUnit = await page.evaluate(() => {
     const K = window.__kacl
-    const tabA = K.seedState('tabA')
-    const tabB = K.seedState('tabB')
-    // A 先推进时钟并写 note；B 基于同一起点写 priority
-    let a = tabA
-    let r = K.dispatch(a, { type: 'user.set', userId: 'u_sched' }); a = r.state
-    r = K.dispatch(a, { type: 'batch.note', id: 'b_1', note: 'A-note' }); a = r.state
-    let b = tabB
-    r = K.dispatch(b, { type: 'user.set', userId: 'u_rev' }); b = r.state
-    r = K.dispatch(b, { type: 'batch.note', id: 'b_1', note: 'B-note' }); b = r.state
+    const prep = K.seedState('prep')
+    // 公共基点：排程员预约已校准机位、推进到测听
+    let x = K.dispatch(prep, { type: 'user.set', userId: 'u_sched' }).state
+    x = K.dispatch(x, { type: 'booking.create', p: {
+      batchId: 'b_1', stationId: 'st_a', prototypeId: 'p_alpha', testerId: 'u_t2',
+      start: '2099-03-10T09:00:00.000Z', end: '2099-03-10T10:00:00.000Z', purpose: 'm',
+      consumable: { item: 'Z', qty: 1 } } }).state
+    x = K.dispatch(x, { type: 'batch.transition', id: 'b_1', target: 'listening' }).state
+    x = K.dispatch(x, { type: 'batch.note', id: 'b_1', note: 'BASE' }).state
+    let a = structuredClone(x)
+    let b = structuredClone(x)
+    // A 改 note；B 改 priority（不同字段）
+    a = K.dispatch(a, { type: 'batch.note', id: 'b_1', note: 'A-note' }).state
+    b = K.dispatch(b, { type: 'user.set', userId: 'u_sched' }).state
+    // priority 用引擎无直接动作，直接改字段不影响断言；这里以 note 分叉演示 LWW
+    b = K.dispatch(b, { type: 'batch.note', id: 'b_1', note: 'B-note' }).state
     // 两页各自产生相同 dedupKey 的测量
-    for (const st of [a, b]) {
-      let x = st
-      r = K.dispatch(x, { type: 'user.set', userId: 'u_t2' }); x = r.state
-      r = K.dispatch(x, { type: 'measure.record', p: { dedupKey: 'DUP-1', batchId: 'b_1', stationId: 'st_a', pressureDb: 50, thockScore: 70, clicks: 1 } })
-      if (st === a) a = r.state; else b = r.state
-    }
+    a = K.dispatch(a, { type: 'user.set', userId: 'u_t2' }).state
+    b = K.dispatch(b, { type: 'user.set', userId: 'u_t2' }).state
+    a = K.dispatch(a, { type: 'measure.record', p: { dedupKey: 'DUP-1', batchId: 'b_1', stationId: 'st_a', pressureDb: 50, thockScore: 70, clicks: 1 } }).state
+    b = K.dispatch(b, { type: 'measure.record', p: { dedupKey: 'DUP-1', batchId: 'b_1', stationId: 'st_a', pressureDb: 50, thockScore: 70, clicks: 1 } }).state
     const merged = K.mergeStates(a, b)
     return {
       dups: merged.report.duplicateMeasurements,
       scalarKeys: merged.report.changedScalars.map(c => c.key),
-      notes: merged.state.batches.find(x => x.id === 'b_1').note,
+      notes: merged.state.batches.find(z => z.id === 'b_1').note,
       measureCount: merged.state.measurements.filter(m => m.dedupKey === 'DUP-1').length,
     }
   })
@@ -403,6 +457,116 @@ await test('场景7 导入导出：正常往返成功，魔数/原型污染/脚�
   const t = await lastToast(page)
   assert.ok(t.includes('拦截') || t.includes('魔数'), `真实导入入口应弹拦截提示，实际：${t}`)
   void dataTransfer
+})
+
+// ============ 场景 8：新增校验反例 + 撤销重做 ============
+await test('场景8 校验反例：坏日期/不存在引用/排队测量/无预约测量全部拒绝且零写入，撤销重做可用', async (page) => {
+  await fresh(page)
+  await switchUser(page, 'u_sched')
+
+  const book = async (patch) => page.evaluate((patch) => {
+    const base = {
+      batchId: 'b_1', stationId: 'st_a', prototypeId: 'p_alpha', testerId: 'u_t2',
+      start: '2099-03-10T09:00:00.000Z', end: '2099-03-10T10:00:00.000Z',
+      purpose: 'm', consumable: { item: '吸音棉', qty: 1 },
+    }
+    const cand = { ...base, ...patch }
+    const before = { n: window.__kacl.useStore.getState().state.bookings.length, c: window.__kacl.useStore.getState().state.consumptions.length }
+    const ok = window.__kacl.useStore.getState().act({ type: 'booking.create', p: cand })
+    const after = { n: window.__kacl.useStore.getState().state.bookings.length, c: window.__kacl.useStore.getState().state.consumptions.length }
+    const st = window.__kacl.useStore.getState().state
+    const audit = st.audit[st.audit.length - 1]
+    return { ok, before, after, auditDetail: audit?.detail ?? '', auditOk: audit?.ok }
+  }, patch)
+
+  // 1) 开始时间无法解析
+  let r = await book({ start: 'not-a-date' })
+  assert.equal(r.ok, false); assert.equal(r.after.n, r.before.n); assert.equal(r.after.c, r.before.c)
+  assert.ok(r.auditDetail.includes('开始时间无效'), `应说明开始时间无效，实际：${r.auditDetail}`)
+  // 2) 结束早于开始
+  r = await book({ start: '2099-03-10T10:00:00.000Z', end: '2099-03-10T09:00:00.000Z' })
+  assert.equal(r.ok, false); assert.ok(r.auditDetail.includes('晚于开始'))
+  // 3) 批次不存在
+  r = await book({ batchId: 'nope-batch' })
+  assert.equal(r.ok, false); assert.equal(r.after.n, r.before.n); assert.ok(r.auditDetail.includes('批次不存在'))
+  // 4) 样机不存在
+  r = await book({ prototypeId: 'nope-proto' })
+  assert.equal(r.ok, false); assert.ok(r.auditDetail.includes('样机不存在'))
+  // 5) 测试员不存在
+  r = await book({ testerId: 'u_admin' }) // 存在但不是 tester
+  assert.equal(r.ok, false); assert.ok(r.auditDetail.includes('测试员'))
+  r = await book({ testerId: 'ghost' })
+  assert.equal(r.ok, false); assert.ok(r.auditDetail.includes('测试员'))
+  // 6) 机位不存在
+  r = await book({ stationId: 'nope-station' })
+  assert.equal(r.ok, false); assert.ok(r.auditDetail.includes('机位不存在'))
+  // 7) 耗材非法也要整单回滚（预约不落库）
+  r = await book({ consumable: { item: '   ', qty: 1 } })
+  assert.equal(r.ok, false); assert.equal(r.after.n, r.before.n, '耗材非法时预约也不得落库')
+  assert.ok(r.auditDetail.includes('耗材'))
+
+  // UI：清空开始时间，提交按钮禁用并出现无效提示
+  await go(page, 'booking')
+  await page.fill('[data-testid="bk-start"]', '')
+  await page.waitForTimeout(100)
+  assert.equal(await page.$eval('[data-testid="bk-submit"]', el => el.disabled), true, '坏日期时按钮禁用')
+  assert.ok(await page.isVisible('[data-testid="bk-invalid"]'), '应显示无效原因')
+
+  // ===== 测量反例 =====
+  const measure = async (patch) => page.evaluate((patch) => {
+    const base = { dedupKey: 'k' + Math.random(), batchId: 'b_1', stationId: 'st_a', pressureDb: 52, thockScore: 80, clicks: 10 }
+    const st0 = window.__kacl.useStore.getState().state
+    const before = st0.measurements.length
+    window.__kacl.useStore.getState().switchUser('u_t2')
+    const ok = window.__kacl.useStore.getState().act({ type: 'measure.record', p: { ...base, ...patch } })
+    const st = window.__kacl.useStore.getState().state
+    return { ok, before, after: st.measurements.length, detail: st.audit[st.audit.length - 1]?.detail ?? '' }
+  }, patch)
+
+  // 排队阶段无预约：拒绝并说明
+  r = await measure({})
+  assert.equal(r.ok, false); assert.equal(r.after, r.before, '排队阶段测量零写入')
+  assert.ok(r.detail.includes('排队') || r.detail.includes('预约'), `应说明排队/无预约原因，实际：${r.detail}`)
+
+  // 排程员建有效预约并推进到测听后，同一测量应成功
+  await switchUser(page, 'u_sched')
+  await act(page, { type: 'booking.create', p: {
+    batchId: 'b_1', stationId: 'st_a', prototypeId: 'p_alpha', testerId: 'u_t2',
+    start: '2099-03-10T09:00:00.000Z', end: '2099-03-10T10:00:00.000Z', purpose: 'm',
+    consumable: { item: '吸音棉', qty: 1 } } })
+  await act(page, { type: 'batch.transition', id: 'b_1', target: 'listening' })
+  const m = await measure({ dedupKey: 'valid-now' })
+  assert.equal(m.ok, true, '有匹配有效预约且测听阶段应能测量')
+  assert.equal(m.after, m.before + 1)
+
+  // 批次不存在 / 测试员与预约不匹配
+  r = await measure({ batchId: 'ghost' })
+  assert.equal(r.ok, false); assert.ok(r.detail.includes('批次不存在'))
+  r = await measure({ dedupKey: 'k-other-tester' }) // 切到无预约的测试员
+  // 上面 measure 固定 u_t2；改用 u_t3（无预约）显式验证
+  const otherTester = await page.evaluate(() => {
+    const K = window.__kacl
+    K.useStore.getState().switchUser('u_t3')
+    const before = K.useStore.getState().state.measurements.length
+    const ok = K.useStore.getState().act({ type: 'measure.record', p: { dedupKey: 'k-t3', batchId: 'b_1', stationId: 'st_a', pressureDb: 52, thockScore: 80, clicks: 1 } })
+    const st = K.useStore.getState().state
+    return { ok, after: st.measurements.length, before, detail: st.audit[st.audit.length - 1].detail }
+  })
+  assert.equal(otherTester.ok, false)
+  assert.equal(otherTester.after, otherTester.before)
+  assert.ok(otherTester.detail.includes('有效预约'), `u_t3 无匹配预约须拒绝，实际：${otherTester.detail}`)
+
+  // ===== 撤销 / 重做不回归 =====
+  await switchUser(page, 'u_sched')
+  const noteBefore = (await state(page)).batches.find(x => x.id === 'b_1').note
+  await act(page, { type: 'batch.note', id: 'b_1', note: '撤销前备注' })
+  assert.equal((await state(page)).batches.find(x => x.id === 'b_1').note, '撤销前备注')
+  await page.click('[data-testid="btn-undo"]')
+  await page.waitForTimeout(120)
+  assert.equal((await state(page)).batches.find(x => x.id === 'b_1').note, noteBefore, '撤销应还原备注')
+  await page.click('[data-testid="btn-redo"]')
+  await page.waitForTimeout(120)
+  assert.equal((await state(page)).batches.find(x => x.id === 'b_1').note, '撤销前备注', '重做应再次应用')
 })
 
 // ============ 汇总 ============

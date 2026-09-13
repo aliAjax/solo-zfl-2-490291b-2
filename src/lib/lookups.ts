@@ -28,5 +28,6 @@ export function toLocalInput(iso: string) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
 }
 export function fromLocalInput(v: string) {
-  return new Date(v).toISOString()
+  const d = new Date(v)
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString()
 }

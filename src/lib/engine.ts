@@ -17,10 +17,12 @@ import type {
   Vote,
 } from '../types/domain'
 import {
+  bookingValidationErrors,
   can,
   findBookingConflict,
   isAnomalous,
   isSelfAssembled,
+  measurementBlockers,
   transitionBlockers,
 } from './rules'
 
@@ -249,7 +251,14 @@ function createBooking(state: AppState, actor: User, p: Omit<Booking, 'id' | 'cr
   return commit(state, actor, 'booking.create', `预约机位 ${p.stationId} / 样机 ${p.prototypeId}`, (ctx) => {
     requirePerm(actor, 'booking.create')
     const s = ctx.s
-    if (new Date(p.end) <= new Date(p.start)) throw new ActionError('结束时间必须晚于开始时间')
+
+    // 1) 日期与引用完整性：任一不合法整体拒绝，零写入
+    const invalidReasons = bookingValidationErrors(s, p)
+    if (invalidReasons.length) throw new ActionError(invalidReasons.join('；'))
+
+    const station = s.stations.find((x) => x.id === p.stationId)!
+
+    // 2) 资源时段冲突
     const conflict = findBookingConflict(s, p)
     if (conflict) {
       const which =
@@ -260,8 +269,17 @@ function createBooking(state: AppState, actor: User, p: Omit<Booking, 'id' | 'cr
             : '样机'
       throw new ActionError(`${which}时段与预约 ${conflict.id} 重叠`)
     }
-    const station = s.stations.find((x) => x.id === p.stationId)
-    if (!station) throw new ActionError('机位不存在')
+
+    // 3) 耗材单合法性（失败同样整单回滚，预约不落库）
+    if (
+      !p.consumable ||
+      typeof p.consumable.item !== 'string' ||
+      p.consumable.item.trim() === '' ||
+      !Number.isFinite(p.consumable.qty) ||
+      p.consumable.qty <= 0
+    ) {
+      throw new ActionError('耗材名称为空或数量非法')
+    }
 
     const booking: Booking = {
       id: uid('bk'),
@@ -330,12 +348,21 @@ function recordMeasurement(state: AppState, actor: User, p: {
   return commit(state, actor, 'measure.record', `批次 ${batch?.code ?? p.batchId} 声压 ${p.pressureDb}dB`, (ctx) => {
     requirePerm(actor, 'measure.record')
     const s = ctx.s
-    const b = s.batches.find((x) => x.id === p.batchId)
-    if (!b) throw new ActionError('批次不存在')
-    if (!s.stations.some((x) => x.id === p.stationId && x.calibrated))
-      throw new ActionError('测量机位不存在或未校准')
 
-    // 幂等：重复测量只吸收一次
+    // 前置闸门：阶段（排队等拒绝）、机位校准、匹配的有效预约
+    const gate = measurementBlockers(s, { batchId: p.batchId, stationId: p.stationId, testerId: actor.id })
+    if (gate.blocked) throw new ActionError(gate.reasons.join('；'))
+    const b = s.batches.find((x) => x.id === p.batchId)!
+
+    if (
+      !p.dedupKey || typeof p.dedupKey !== 'string' ||
+      !Number.isFinite(p.pressureDb) || !Number.isFinite(p.thockScore) ||
+      !Number.isFinite(p.clicks) || p.clicks < 0
+    ) {
+      throw new ActionError('测量数据非法（幂等键/声压/评分/次数）')
+    }
+
+    // 幂等：重复测量只吸收一次（前置闸门通过后才吸收）
     if (s.dedup[p.dedupKey] !== undefined) {
       audit(ctx, 'measure.record', true, `重复测量 ${p.dedupKey} 已被吸收，仅保留一次`)
       return '重复测量已忽略（同场次只吸收一次）'

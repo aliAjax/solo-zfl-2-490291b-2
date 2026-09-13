@@ -76,6 +76,28 @@ export function MergeView() {
                 <ul data-testid="merge-dups" className="max-h-48 space-y-0.5 overflow-auto font-mono text-[11px] text-slateblue-400">{r.duplicateMeasurements.map((x) => <li key={x}>⧉ {x}（只计一次）</li>)}</ul>}
             </Card>
           </div>
+
+          <Card className="p-4">
+            <div className="mb-2 text-sm font-semibold text-ink-200">盲测重复投票拦截（{r.voteConflicts.length}）</div>
+            {r.voteConflicts.length === 0 ? <div className="text-xs text-ink-600">无（不同测试员的票已全部并存）</div> : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="text-ink-500"><tr><th className="px-2 py-1">场次</th><th className="px-2 py-1">测试员</th><th className="px-2 py-1">保留票</th><th className="px-2 py-1">拦截票</th><th className="px-2 py-1">裁决</th></tr></thead>
+                  <tbody>
+                    {r.voteConflicts.map((c, i) => (
+                      <tr key={`${c.sessionId}-${c.testerId}-${i}`} className="border-t border-ink-800">
+                        <td className="px-2 py-1.5 font-mono text-ink-300">{c.sessionCode}</td>
+                        <td className="px-2 py-1.5 text-ink-200">{c.testerId}</td>
+                        <td className="px-2 py-1.5"><Badge tone="green">{c.keptRating}</Badge></td>
+                        <td className="px-2 py-1.5"><Badge tone="red">{c.droppedRating}</Badge></td>
+                        <td className="px-2 py-1.5 text-ink-500">{c.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
         </div>
       )}
     </div>
