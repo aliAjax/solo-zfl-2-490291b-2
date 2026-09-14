@@ -688,6 +688,9 @@ await test('场景10 投票合并顺序无关：同人同时刻不同评分正�
     sesB.votes.push(vote('u_t1', 60, 'dup', T))
     // 4) 不同测试员只在其中一页 -> 并集保留
     sesA.votes.push(vote('u_admin', 55, 'onlyA', T))
+    // 5) 串键反例：70/"9x" 与 7/"09x" 若用字符串直拼都是 "709x"，必须按结构化值判为两张不同票并裁决
+    sesA.votes.push(vote('u_rev', 70, '9x', T))
+    sesB.votes.push(vote('u_rev', 7, '09x', T))
     // 测量：两页同 dedupKey、不同 id -> 去重只吸收一次
     A.measurements.push({ id: 'mA', dedupKey: 'DUP-SYM', batchId: 'b_1', stationId: 'st_a', testerId: 'u_t2', at: T, pressureDb: 50, thockScore: 70, clicks: 1, abnormal: false })
     B.measurements.push({ id: 'mB', dedupKey: 'DUP-SYM', batchId: 'b_1', stationId: 'st_a', testerId: 'u_t2', at: T, pressureDb: 50, thockScore: 70, clicks: 1, abnormal: false })
@@ -729,9 +732,13 @@ await test('场景10 投票合并顺序无关：同人同时刻不同评分正�
   assert.equal(Object.keys(probe.votesAB).filter(t => t === 'u_t1').length, 1)
   // 不同测试员并集
   assert.ok(probe.votesAB['u_admin'] && probe.votesBA['u_admin'], '仅一页出现的不同测试员票也须并集保留')
-  // 冲突集正反向一致：t2 同时刻 + t3 先后 各一条
+  // 串键反例：拼接同键但结构化值不同，必须进入裁决并保留同一张（评分 7 < 70，故保留 7），且记冲突
+  assert.deepEqual(probe.votesAB['u_rev'], probe.votesBA['u_rev'], '串键对正反向必须收敛到同一张票')
+  assert.equal(probe.votesAB['u_rev'].rating, 7, '结构化裁决保留评分 7/"09x"，不能被 70/"9x" 误吸收')
+  assert.equal(probe.votesAB['u_rev'].comment, '09x')
+  // 冲突集正反向一致：t2 同时刻 + t3 先后 + rev 串键 各一条
   assert.deepEqual(probe.confAB, probe.confBA, '冲突裁决正反向必须一致')
-  assert.deepEqual(probe.confAB, ['u_t2:70>99', 'u_t3:88>91'])
+  assert.deepEqual(probe.confAB, ['u_rev:7>70', 'u_t2:70>99', 'u_t3:88>91'])
   assert.ok(probe.tiedReasonAB.includes('同一投票时间'))
   // 测量去重正反向一致，只吸收一次
   assert.equal(probe.measureAB, 1)

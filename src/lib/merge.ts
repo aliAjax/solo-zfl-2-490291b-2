@@ -148,10 +148,12 @@ export function mergeStates(
 
     const finalVotes: Vote[] = []
     for (const [testerId, rawVotes] of byTester) {
+      // 相同票判定必须基于结构化值，不能字符串直拼（否则 70/"9x" 与 7/"09x" 串成同一键）
+      const contentKey = (v: Vote) => JSON.stringify([v.rating, v.comment])
       // 先按内容分组：相同票（同评分同评语）幂等吸收为一张，时间取最早
       const groups = new Map<string, Vote[]>()
       for (const v of rawVotes) {
-        const k = `${v.rating}${v.comment}`
+        const k = contentKey(v)
         const arr = groups.get(k) ?? []
         arr.push(v)
         groups.set(k, arr)
@@ -164,12 +166,13 @@ export function mergeStates(
         finalVotes.push(uniqVotes[0])
         continue
       }
-      // 不同票：先按时间取最早；同时间用与方向无关的确定性键裁决，只记一次冲突
+      // 不同票：先按时间取最早；同时间用与方向无关的结构化比较（先评分后评语）裁决
       uniqVotes.sort((a, b) => {
         const ta = voteTime(a)
         const tb = voteTime(b)
         if (ta !== tb) return ta - tb
-        return `${a.rating} ${a.comment}` < `${b.rating} ${b.comment}` ? -1 : 1
+        if (a.rating !== b.rating) return a.rating - b.rating
+        return a.comment < b.comment ? -1 : a.comment > b.comment ? 1 : 0
       })
       const kept = uniqVotes[0]
       const dropped = uniqVotes[1]
