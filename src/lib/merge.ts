@@ -119,55 +119,82 @@ export function mergeStates(
     ;(out[coll] as unknown) = [...merged.values()]
   }
 
-  // ---- 盲测场次：票按测试员并集；同人分叉投票检测冲突，先投保留、后投拦截 ----
-  const voteAt = (v: Vote) => {
-    const t = new Date(v.at).getTime()
+  // ---- 盲测场次：票按测试员并集；同人分叉投票做与合并方向无关的对称裁决 ----
+  const voteTime = (v: Vote) => {
+    const t = Date.parse(v.at)
     return Number.isNaN(t) ? 0 : t
   }
-  for (const rSes of remote.sessions) {
-    const lSes = out.sessions.find((x) => x.id === rSes.id)
-    if (!lSes) continue // 新建场次已在 union 阶段加入；被墓碑删除的场次跳过
-    // 评审团 / 样本：按成员并集（不漏掉任一页新增成员或样本）
-    lSes.panel = Array.from(new Set([...lSes.panel, ...rSes.panel]))
-    lSes.sampleCodes = Array.from(new Set([...lSes.sampleCodes, ...rSes.sampleCodes]))
 
-    const localHasVote = (testerId: string) => lSes.votes.some((v) => v.testerId === testerId)
-    for (const rv of rSes.votes) {
-      if (!localHasVote(rv.testerId)) {
-        // 不同测试员的合法票：双方都保留
-        lSes.votes = [...lSes.votes, structuredClone(rv)]
+  const allSessionIds = Array.from(
+    new Set([...local.sessions.map((x) => x.id), ...remote.sessions.map((x) => x.id)]),
+  )
+  for (const sid of allSessionIds) {
+    const lSes = local.sessions.find((x) => x.id === sid)
+    const rSes = remote.sessions.find((x) => x.id === sid)
+    const outSes = out.sessions.find((x) => x.id === sid)
+    if (!outSes) continue // 被墓碑删除的场次跳过
+
+    // 评审团 / 样本：成员并集（不漏掉任一页新增）
+    outSes.panel = Array.from(new Set([...(lSes?.panel ?? []), ...(rSes?.panel ?? [])]))
+    outSes.sampleCodes = Array.from(new Set([...(lSes?.sampleCodes ?? []), ...(rSes?.sampleCodes ?? [])]))
+
+    // 把两页的票按测试员归集（每页同人至多一票），再对称收敛
+    const byTester = new Map<string, Vote[]>()
+    for (const v of [...(lSes?.votes ?? []), ...(rSes?.votes ?? [])]) {
+      const arr = byTester.get(v.testerId) ?? []
+      arr.push(structuredClone(v))
+      byTester.set(v.testerId, arr)
+    }
+
+    const finalVotes: Vote[] = []
+    for (const [testerId, rawVotes] of byTester) {
+      // 先按内容分组：相同票（同评分同评语）幂等吸收为一张，时间取最早
+      const groups = new Map<string, Vote[]>()
+      for (const v of rawVotes) {
+        const k = `${v.rating}${v.comment}`
+        const arr = groups.get(k) ?? []
+        arr.push(v)
+        groups.set(k, arr)
+      }
+      const uniqVotes = [...groups.values()].map((same) =>
+        same.reduce((earliest, v) => (voteTime(v) < voteTime(earliest) ? v : earliest)),
+      )
+
+      if (uniqVotes.length === 1) {
+        finalVotes.push(uniqVotes[0])
         continue
       }
-      const lv = lSes.votes.find((v) => v.testerId === rv.testerId)!
-      // 同票（内容一致）幂等吸收；不同票=同人分叉重复投票，拦截后投
-      if (lv.rating === rv.rating && lv.comment === rv.comment) continue
-      const lvAt = voteAt(lv)
-      const rvAt = voteAt(rv)
-      if (rvAt >= lvAt) {
-        // 远程是后投：保持本地先投，记录冲突
-        voteConflicts.push({
-          sessionId: rSes.id,
-          sessionCode: rSes.code,
-          testerId: rv.testerId,
-          keptRating: lv.rating,
-          droppedRating: rv.rating,
-          reason: `同一测试员分叉投票：先投 ${lv.rating} 保留，后投 ${rv.rating} 拦截（不静默覆盖）`,
-        })
-      } else {
-        // 远程更早：以远程先投为准，本地后投计入冲突
-        voteConflicts.push({
-          sessionId: rSes.id,
-          sessionCode: rSes.code,
-          testerId: rv.testerId,
-          keptRating: rv.rating,
-          droppedRating: lv.rating,
-          reason: `同一测试员分叉投票：先投 ${rv.rating} 保留，后投 ${lv.rating} 拦截（不静默覆盖）`,
-        })
-        lSes.votes = lSes.votes.map((v) => (v.testerId === rv.testerId ? structuredClone(rv) : v))
-      }
+      // 不同票：先按时间取最早；同时间用与方向无关的确定性键裁决，只记一次冲突
+      uniqVotes.sort((a, b) => {
+        const ta = voteTime(a)
+        const tb = voteTime(b)
+        if (ta !== tb) return ta - tb
+        return `${a.rating} ${a.comment}` < `${b.rating} ${b.comment}` ? -1 : 1
+      })
+      const kept = uniqVotes[0]
+      const dropped = uniqVotes[1]
+      const tied = voteTime(kept) === voteTime(dropped)
+      finalVotes.push(kept)
+      voteConflicts.push({
+        sessionId: sid,
+        sessionCode: outSes.code,
+        testerId,
+        keptRating: kept.rating,
+        droppedRating: dropped.rating,
+        reason: tied
+          ? `同一测试员在两页于同一投票时间写入不同评分：确定性保留 ${kept.rating}，${dropped.rating} 记为冲突（正反向合并结果一致）`
+          : `同一测试员分叉投票：先投 ${kept.rating} 保留，后投 ${dropped.rating} 拦截（不静默覆盖）`,
+      })
     }
-    lSes.votes.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
+    finalVotes.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.testerId < b.testerId ? -1 : 1))
+    outSes.votes = finalVotes
   }
+  // 冲突报告顺序也与合并方向无关
+  voteConflicts.sort((a, b) =>
+    a.sessionId === b.sessionId
+      ? a.testerId < b.testerId ? -1 : a.testerId > b.testerId ? 1 : 0
+      : a.sessionId < b.sessionId ? -1 : 1,
+  )
 
   // ---- 应用墓碑删除 ----
   for (const coll of MERGE_COLLS) {

@@ -660,6 +660,86 @@ await test('场景9 真实公历+装配关系+自装限制：2/30、非闰年2/2
   assert.ok(selfMeasure.abnormal.reason.includes('自己装配'))
 })
 
+// ============ 场景 10：同人同时刻投票，正/反向合并必须收敛一致 ============
+await test('场景10 投票合并顺序无关：同人同时刻不同评分正反向保留同一张；先后投/幂等/并集/测量去重一致', async (page) => {
+  await fresh(page)
+  const probe = await page.evaluate(() => {
+    const K = window.__kacl
+    // 公共基点：评审员建场次（panel 含 t2、t3）
+    let base = K.dispatch(K.seedState('base'), { type: 'user.set', userId: 'u_rev' }).state
+    base = K.dispatch(base, { type: 'session.create', p: { batchId: 'b_1', sampleCodes: ['S-01'], panel: ['u_t2', 'u_t3'] } }).state
+    const sid = base.sessions.find(s => s.batchId === 'b_1').id
+
+    const vote = (testerId, rating, comment, at) => ({ testerId, rating, comment, at })
+    const T = '2026-05-01T10:00:00.000Z'
+    const fork = () => structuredClone(base)
+    const A = fork(); const B = fork()
+    const sesA = A.sessions.find(s => s.id === sid)
+    const sesB = B.sessions.find(s => s.id === sid)
+
+    // 1) 同一测试员 t2、同一投票时间、两页写入不同评分（70 vs 99）
+    sesA.votes.push(vote('u_t2', 70, 'a', T))
+    sesB.votes.push(vote('u_t2', 99, 'b', T))
+    // 2) 同测试员 t3、有明确先后：A 更早 88，B 更晚 91 -> 先投 88 必保留
+    sesA.votes.push(vote('u_t3', 88, 'x', '2026-05-01T09:00:00.000Z'))
+    sesB.votes.push(vote('u_t3', 91, 'y', '2026-05-01T11:00:00.000Z'))
+    // 3) 相同票（同评分同评语）两页各一张 -> 幂等吸收，不记冲突
+    sesA.votes.push(vote('u_t1', 60, 'dup', T))
+    sesB.votes.push(vote('u_t1', 60, 'dup', T))
+    // 4) 不同测试员只在其中一页 -> 并集保留
+    sesA.votes.push(vote('u_admin', 55, 'onlyA', T))
+    // 测量：两页同 dedupKey、不同 id -> 去重只吸收一次
+    A.measurements.push({ id: 'mA', dedupKey: 'DUP-SYM', batchId: 'b_1', stationId: 'st_a', testerId: 'u_t2', at: T, pressureDb: 50, thockScore: 70, clicks: 1, abnormal: false })
+    B.measurements.push({ id: 'mB', dedupKey: 'DUP-SYM', batchId: 'b_1', stationId: 'st_a', testerId: 'u_t2', at: T, pressureDb: 50, thockScore: 70, clicks: 1, abnormal: false })
+    A.dedup['DUP-SYM'] = 1; B.dedup['DUP-SYM'] = 1
+
+    const ab = K.mergeStates(A, B)
+    const ba = K.mergeStates(B, A)
+    const votesOf = (st) => {
+      const m = {}
+      for (const v of st.sessions.find(s => s.id === sid).votes) m[v.testerId] = { rating: v.rating, comment: v.comment, at: v.at }
+      return m
+    }
+    const conflictsOf = (rep) => rep.voteConflicts
+      .filter(c => c.sessionId === sid)
+      .map(c => `${c.testerId}:${c.keptRating}>${c.droppedRating}`)
+      .sort()
+    return {
+      votesAB: votesOf(ab.state),
+      votesBA: votesOf(ba.state),
+      confAB: conflictsOf(ab.report),
+      confBA: conflictsOf(ba.report),
+      measureAB: ab.state.measurements.filter(m => m.dedupKey === 'DUP-SYM').length,
+      measureBA: ba.state.measurements.filter(m => m.dedupKey === 'DUP-SYM').length,
+      dupAB: ab.report.duplicateMeasurements,
+      dupBA: ba.report.duplicateMeasurements,
+      tiedReasonAB: ab.report.voteConflicts.find(c => c.testerId === 'u_t2')?.reason ?? '',
+    }
+  })
+
+  // 正反向合并：同人同时刻不同评分必须保留同一张
+  assert.deepEqual(probe.votesAB, probe.votesBA, '正反向合并最终投票必须完全一致')
+  assert.equal(probe.votesAB['u_t2'].rating, 70, '同时间不同票按确定性规则保留 70（"70 a" < "99 b"）')
+  assert.equal(probe.votesBA['u_t2'].rating, 70, '反向合并也必须保留同一张 70，不能各保留自己的 99')
+  // 明确先后：先投 88 保留
+  assert.equal(probe.votesAB['u_t3'].rating, 88)
+  assert.equal(probe.votesBA['u_t3'].rating, 88)
+  // 相同票幂等吸收为一张
+  assert.equal(probe.votesAB['u_t1'].rating, 60)
+  assert.equal(Object.keys(probe.votesAB).filter(t => t === 'u_t1').length, 1)
+  // 不同测试员并集
+  assert.ok(probe.votesAB['u_admin'] && probe.votesBA['u_admin'], '仅一页出现的不同测试员票也须并集保留')
+  // 冲突集正反向一致：t2 同时刻 + t3 先后 各一条
+  assert.deepEqual(probe.confAB, probe.confBA, '冲突裁决正反向必须一致')
+  assert.deepEqual(probe.confAB, ['u_t2:70>99', 'u_t3:88>91'])
+  assert.ok(probe.tiedReasonAB.includes('同一投票时间'))
+  // 测量去重正反向一致，只吸收一次
+  assert.equal(probe.measureAB, 1)
+  assert.equal(probe.measureBA, 1)
+  assert.deepEqual(probe.dupAB, ['DUP-SYM'])
+  assert.deepEqual(probe.dupBA, ['DUP-SYM'])
+})
+
 // ============ 汇总 ============
 console.log('\n================ 汇总 ================')
 const pass = results.filter(r => r.ok).length
