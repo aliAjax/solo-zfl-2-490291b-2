@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useStore } from '../store/useStore'
-import { STAGE_LABEL, STAGE_ORDER, type Batch, type Stage } from '../types/domain'
+import { STAGE_LABEL, STAGE_ORDER, STAGE_TONE, type Batch, type Stage } from '../types/domain'
 import { can, STAGE_GRAPH, transitionBlockers } from '../lib/rules'
-import { Badge, Btn, Card, EmptyState, Field, Input, Modal, Select, STAGE_TONE, Textarea } from './ui'
+import { Badge, Btn, Card, EmptyState, Field, Input, Modal, Select, Textarea } from './ui'
 import { fmtTime, protoName, recipeName, switchCode, userName } from '../lib/lookups'
 
 export function Board({ openBatch }: { openBatch: (id: string) => void }) {

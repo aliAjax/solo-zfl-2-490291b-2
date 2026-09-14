@@ -15,7 +15,6 @@ export interface ImportResult {
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
 const isStr = (x: unknown): x is string => typeof x === 'string'
 const isNum = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x)
-const isBool = (x: unknown): x is boolean => typeof x === 'boolean'
 
 // 递归拒绝原型污染键
 function guardProtoPath(path: string) {

@@ -18,10 +18,13 @@ export function BookingView() {
   const actor = s.users.find((u) => u.id === s.currentUserId)
   const canBook = can(actor, 'booking.create')
   const slot0 = defaultSlot(1)
+  const firstProtoId = s.batches[0]?.prototypeId ?? s.prototypes[0]?.id ?? ''
+  const firstProto = s.prototypes.find((p) => p.id === firstProtoId)
+  const firstTester = s.users.find((u) => u.role === 'tester' && u.id !== firstProto?.assembledBy)
   const [batchId, setBatchId] = useState(s.batches[0]?.id ?? '')
   const [stationId, setStationId] = useState(s.stations[0]?.id ?? '')
-  const [prototypeId, setPrototypeId] = useState(s.batches[0]?.prototypeId ?? s.prototypes[0]?.id ?? '')
-  const [testerId, setTesterId] = useState(s.users.filter((u) => u.role === 'tester')[0]?.id ?? '')
+  const [prototypeId, setPrototypeId] = useState(firstProtoId)
+  const [testerId, setTesterId] = useState(firstTester?.id ?? '')
   const [start, setStart] = useState(slot0.start)
   const [end, setEnd] = useState(slot0.end)
   const [purpose, setPurpose] = useState('声学测听')
@@ -29,6 +32,12 @@ export function BookingView() {
   const [qty, setQty] = useState(2)
 
   const batch = s.batches.find((b) => b.id === batchId)
+  // 为所选样机挑一个“非装机人”的默认测试员，避免默认就撞上自装限制
+  const nonSelfTester = (protoId: string, prefer = testerId) => {
+    const assembler = s.prototypes.find((p) => p.id === protoId)?.assembledBy
+    const candidates = s.users.filter((u) => u.role === 'tester' && u.id !== assembler)
+    return (candidates.some((u) => u.id === prefer) ? prefer : candidates[0]?.id) ?? ''
+  }
   const candidate = {
     batchId, stationId, prototypeId, testerId,
     start: fromLocalInput(start), end: fromLocalInput(end), purpose,
@@ -60,7 +69,10 @@ export function BookingView() {
               <Select data-testid="bk-batch" value={batchId} onChange={(e) => {
                 setBatchId(e.target.value)
                 const b = s.batches.find((x) => x.id === e.target.value)
-                if (b) setPrototypeId(b.prototypeId)
+                if (b) {
+                  setPrototypeId(b.prototypeId)
+                  setTesterId(nonSelfTester(b.prototypeId))
+                }
               }}>
                 {s.batches.map((b) => <option key={b.id} value={b.id}>{b.code}</option>)}
               </Select>
@@ -71,13 +83,19 @@ export function BookingView() {
               </Select>
             </Field>
             <Field label="样机">
-              <Select data-testid="bk-proto" value={prototypeId} onChange={(e) => setPrototypeId(e.target.value)}>
-                {s.prototypes.map((p) => <option key={p.id} value={p.id}>{p.code} {p.name}</option>)}
+              <Select data-testid="bk-proto" value={prototypeId} onChange={(e) => {
+                setPrototypeId(e.target.value)
+                setTesterId(nonSelfTester(e.target.value))
+              }}>
+                {s.prototypes.map((p) => <option key={p.id} value={p.id}>{p.code} {p.name}（装机 {userName(s, p.assembledBy)}）</option>)}
               </Select>
             </Field>
-            <Field label="测试员">
-              <Select value={testerId} onChange={(e) => setTesterId(e.target.value)}>
-                {s.users.filter((u) => u.role === 'tester').map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+            <Field label="测试员（装机人不可预约/测量自装样机）">
+              <Select data-testid="bk-tester" value={testerId} onChange={(e) => setTesterId(e.target.value)}>
+                {s.users.filter((u) => u.role === 'tester').map((u) => {
+                  const assembler = s.prototypes.find((p) => p.id === prototypeId)?.assembledBy
+                  return <option key={u.id} value={u.id}>{u.name}{assembler === u.id ? '（装机人·禁止）' : ''}</option>
+                })}
               </Select>
             </Field>
             <div className="grid grid-cols-2 gap-3">

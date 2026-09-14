@@ -1,6 +1,5 @@
 import { useEffect, type HTMLAttributes, type ReactNode, type ButtonHTMLAttributes, type SelectHTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react'
 import { cn } from '../lib/utils'
-import type { Stage } from '../types/domain'
 
 export function Card({ children, className, ...rest }: HTMLAttributes<HTMLDivElement> & { children: ReactNode }) {
   return (
@@ -49,15 +48,6 @@ export function Badge({ children, tone = 'neutral', className }: { children: Rea
       {children}
     </span>
   )
-}
-
-export const STAGE_TONE: Record<Stage, 'neutral' | 'blue' | 'gold' | 'purple' | 'green' | 'red'> = {
-  queued: 'neutral',
-  listening: 'blue',
-  retest: 'gold',
-  review: 'purple',
-  released: 'green',
-  quarantined: 'red',
 }
 
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {

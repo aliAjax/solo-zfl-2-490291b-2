@@ -230,6 +230,15 @@ export const STAGE_ORDER: Stage[] = [
   'quarantined',
 ]
 
+export const STAGE_TONE: Record<Stage, 'neutral' | 'blue' | 'gold' | 'purple' | 'green' | 'red'> = {
+  queued: 'neutral',
+  listening: 'blue',
+  retest: 'gold',
+  review: 'purple',
+  released: 'green',
+  quarantined: 'red',
+}
+
 export const ROLE_LABEL: Record<Role, string> = {
   admin: '管理员',
   scheduler: '排程员',

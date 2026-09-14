@@ -11,7 +11,6 @@ import type {
   Prototype,
   Recipe,
   Stage,
-  Station,
   SwitchBatch,
   User,
   Vote,
@@ -67,7 +66,7 @@ type Ctx = {
   seen: (dedupKey: string) => void
 }
 
-function makeCtx(s: AppState, actor: User, action: string): Ctx {
+function makeCtx(s: AppState, actor: User): Ctx {
   const txId = uid('tx')
   const ctx: Ctx = {
     s,
@@ -124,7 +123,7 @@ function commit(
   mutate: (ctx: Ctx) => string | void,
 ): Outcome {
   const s = structuredClone(state)
-  const ctx = makeCtx(s, actor, action)
+  const ctx = makeCtx(s, actor)
   try {
     const noticeOut = mutate(ctx)
     const notice = typeof noticeOut === 'string' ? noticeOut : undefined
@@ -136,7 +135,7 @@ function commit(
   } catch (err) {
     // 整单回滚：在进入前快照上记录失败，不保留任何业务改动
     const rolled = structuredClone(state)
-    const rctx = makeCtx(rolled, actor, action)
+    const rctx = makeCtx(rolled, actor)
     audit(rctx, action, false, `${detail} → 已整单回滚（${(err as Error).message}）`, true)
     rolled.clock = rctx.v
     rolled.audit = [...rolled.audit, ...rctx.events]
@@ -312,7 +311,6 @@ function createBooking(state: AppState, actor: User, p: Omit<Booking, 'id' | 'cr
 }
 
 function cancelBooking(state: AppState, actor: User, bookingId: string): Outcome {
-  const bk = state.bookings.find((x) => x.id === bookingId)
   return commit(state, actor, 'booking.cancel', `撤销预约 ${bookingId}`, (ctx) => {
     requirePerm(actor, 'booking.cancel')
     const s = ctx.s

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AppState, MergeReport, User } from '../types/domain'
+import type { AppState, User } from '../types/domain'
 import { dispatch, type Action } from '../lib/engine'
 import { mergeStates } from '../lib/merge'
 import { exportJson, parseImport } from '../lib/importExport'

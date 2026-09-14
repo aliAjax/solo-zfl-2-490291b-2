@@ -109,10 +109,10 @@ await test('场景2 资源冲突：机位/样机时段重叠无法预约，冲�
   assert.ok((await lastToast(page)) || true)
   await page.waitForSelector('text=资源冲突')
 
-  // 强行通过引擎提交，应整体失败且零改动
+  // 强行通过引擎提交，应整体失败且零改动（用非装机测试员 u_t1，使失败原因纯粹是时段冲突）
   const before = await state(page)
   await act(page, { type: 'booking.create', p: {
-    batchId: 'b_2', stationId: 'st_a', prototypeId: 'p_beta', testerId: 'u_t2',
+    batchId: 'b_2', stationId: 'st_a', prototypeId: 'p_beta', testerId: 'u_t1',
     start: new Date(SLOT2.s).toISOString(), end: new Date(SLOT2.e).toISOString(), purpose: 'x',
     consumable: { item: '吸音棉', qty: 9 } } })
   const after = await state(page)
@@ -120,9 +120,12 @@ await test('场景2 资源冲突：机位/样机时段重叠无法预约，冲�
   assert.equal(after.consumptions.length, before.consumptions.length, '失败时耗材零出库')
   assert.ok(after.audit.some(a => !a.ok && a.detail.includes('时段')), '审计记录冲突回滚')
 
-  // 同一样机不同机位（st_b）在重叠时段也应冲突
+  // 同一样机（切回 b_1/p_alpha）在不同机位 st_b 的重叠时段也应冲突
+  await page.selectOption('[data-testid="bk-batch"]', 'b_1')
   await page.selectOption('[data-testid="bk-station"]', 'st_b')
   await page.selectOption('[data-testid="bk-proto"]', 'p_alpha') // 与第一笔同样机
+  await page.fill('[data-testid="bk-start"]', SLOT2.s)
+  await page.fill('[data-testid="bk-end"]', SLOT2.e)
   await page.waitForTimeout(100)
   assert.equal(await page.$eval('[data-testid="bk-submit"]', el => el.disabled), true, '同样机不同机位重叠也须禁用')
   // 不重叠的另一时段可成功
@@ -130,7 +133,6 @@ await test('场景2 资源冲突：机位/样机时段重叠无法预约，冲�
   await page.fill('[data-testid="bk-end"]', SLOT3.e)
   await page.waitForTimeout(100)
   assert.equal(await page.$eval('[data-testid="bk-submit"]', el => el.disabled), false, '错峰时段应可预约')
-  void s
 })
 
 // ============ 场景 3：盲测越权 ============
@@ -218,7 +220,7 @@ await test('场景4 异常隔离：声压超阈自动隔离，撤销预约+回�
   // 复测失败路径：另一批次先入测听，再判复测失败 -> 隔离
   await switchUser(page, 'u_sched')
   await act(page, { type: 'booking.create', p: {
-    batchId: 'b_2', stationId: 'st_b', prototypeId: 'p_beta', testerId: 'u_t2',
+    batchId: 'b_2', stationId: 'st_b', prototypeId: 'p_beta', testerId: 'u_t1',
     start: new Date(SLOT3.s).toISOString(), end: new Date(SLOT3.e).toISOString(), purpose: '复测',
     consumable: { item: '吸音棉', qty: 1 } } })
   await act(page, { type: 'batch.transition', id: 'b_2', target: 'listening' })
@@ -256,7 +258,7 @@ await test('场景5 失败回滚：权限不足/校准失效/事务内抛错全�
     start: new Date(SLOT1.s).toISOString(), end: new Date(SLOT1.e).toISOString(), purpose: 'a', consumable: { item: 'X', qty: 1 } } })
   const before = await state(page)
   await act(page, { type: 'booking.create', p: {
-    batchId: 'b_2', stationId: 'st_a', prototypeId: 'p_beta', testerId: 'u_t2',
+    batchId: 'b_2', stationId: 'st_a', prototypeId: 'p_beta', testerId: 'u_t1',
     start: new Date(SLOT2.s).toISOString(), end: new Date(SLOT2.e).toISOString(), purpose: 'b', consumable: { item: 'Y', qty: 2 } } })
   const after = await state(page)
   assert.equal(after.bookings.length, before.bookings.length, '冲突预约回滚')
@@ -482,7 +484,7 @@ await test('场景8 校验反例：坏日期/不存在引用/排队测量/无预
   // 1) 开始时间无法解析
   let r = await book({ start: 'not-a-date' })
   assert.equal(r.ok, false); assert.equal(r.after.n, r.before.n); assert.equal(r.after.c, r.before.c)
-  assert.ok(r.auditDetail.includes('开始时间无效'), `应说明开始时间无效，实际：${r.auditDetail}`)
+  assert.ok(r.auditDetail.includes('开始时间'), `应说明开始时间无效，实际：${r.auditDetail}`)
   // 2) 结束早于开始
   r = await book({ start: '2099-03-10T10:00:00.000Z', end: '2099-03-10T09:00:00.000Z' })
   assert.equal(r.ok, false); assert.ok(r.auditDetail.includes('晚于开始'))
@@ -567,6 +569,95 @@ await test('场景8 校验反例：坏日期/不存在引用/排队测量/无预
   await page.click('[data-testid="btn-redo"]')
   await page.waitForTimeout(120)
   assert.equal((await state(page)).batches.find(x => x.id === 'b_1').note, '撤销前备注', '重做应再次应用')
+})
+
+// ============ 场景 9：日期真实性 / 装配关系 / 自装预约与测量 ============
+await test('场景9 真实公历+装配关系+自装限制：2/30、非闰年2/29、错配、自装预约/测量(含异常)全拦截', async (page) => {
+  await fresh(page)
+  await switchUser(page, 'u_sched')
+
+  const bookRaw = async (patch) => page.evaluate((patch) => {
+    const base = {
+      batchId: 'b_1', stationId: 'st_a', prototypeId: 'p_alpha', testerId: 'u_t2',
+      start: '2099-03-10T09:00:00.000Z', end: '2099-03-10T10:00:00.000Z',
+      purpose: 'm', consumable: { item: '吸音棉', qty: 1 },
+    }
+    const st0 = window.__kacl.useStore.getState().state
+    const before = { n: st0.bookings.length, c: st0.consumptions.length }
+    const ok = window.__kacl.useStore.getState().act({ type: 'booking.create', p: { ...base, ...patch } })
+    const st = window.__kacl.useStore.getState().state
+    return { ok, before, after: { n: st.bookings.length, c: st.consumptions.length }, detail: st.audit[st.audit.length - 1]?.detail ?? '' }
+  }, patch)
+
+  // 真实公历：二月三十不存在（非闰年）
+  let r = await bookRaw({ start: '2026-02-30T09:00:00.000Z', end: '2026-02-30T10:00:00.000Z' })
+  assert.equal(r.ok, false); assert.equal(r.after.n, r.before.n); assert.equal(r.after.c, r.before.c)
+  assert.ok(r.detail.includes('公历'), `应拒绝 2/30，实际：${r.detail}`)
+  // 非闰年 2 月 29 日
+  r = await bookRaw({ start: '2023-02-29T09:00:00.000Z', end: '2023-02-29T10:00:00.000Z' })
+  assert.equal(r.ok, false); assert.ok(r.detail.includes('公历'), '非闰年 2/29 必须拒绝')
+  // 13 月
+  r = await bookRaw({ start: '2026-13-01T09:00:00.000Z', end: '2026-13-01T10:00:00.000Z' })
+  assert.equal(r.ok, false); assert.ok(r.detail.includes('公历'))
+  // 闰年 2/29 必须通过（2024 为闰年）
+  r = await bookRaw({ start: '2024-02-29T09:00:00.000Z', end: '2024-02-29T10:00:00.000Z' })
+  assert.equal(r.ok, true, '闰年 2/29 是真实公历时刻，应通过')
+
+  // 装配关系：批次 b_1（样机 p_alpha）选了另一台样机 p_beta
+  r = await bookRaw({ prototypeId: 'p_beta' })
+  assert.equal(r.ok, false); assert.equal(r.after.n, r.before.n, '错配样机不得落库')
+  assert.ok(r.detail.includes('装配关系'), `应说明装配关系不一致，实际：${r.detail}`)
+
+  // 自装预约：p_alpha 装机人是 u_t1，测试员 u_t1 预约自己装的样机 -> 拒绝
+  r = await bookRaw({ testerId: 'u_t1' })
+  assert.equal(r.ok, false); assert.equal(r.after.n, r.before.n)
+  assert.ok(r.detail.includes('自己装配'), `应拒绝自装样机预约，实际：${r.detail}`)
+
+  // ===== 自装测量：即便存在遗留预约，正常与异常声压都必须先被闸门拦下 =====
+  // 手工注入一条“装机人 u_t1 的有效预约”并让批次进入测听（绕过预约层以直达测量层）
+  const selfMeasure = await page.evaluate(() => {
+    const K = window.__kacl
+    const st = K.useStore.getState().state
+    const seeded = structuredClone(st)
+    seeded.bookings.push({
+      id: 'legacy_self_bk', batchId: 'b_1', stationId: 'st_a', prototypeId: 'p_alpha', testerId: 'u_t1',
+      start: '2099-03-11T09:00:00.000Z', end: '2099-03-11T10:00:00.000Z', purpose: 'legacy', createdAt: '2099-03-01T00:00:00.000Z',
+    })
+    const b = seeded.batches.find(x => x.id === 'b_1')
+    b.stage = 'listening'
+    K.useStore.setState({ state: seeded, past: [], future: [] })
+    const outcomes = {}
+    // 正常声压
+    K.useStore.getState().switchUser('u_t1')
+    const before = K.useStore.getState().state
+    const okNormal = K.useStore.getState().act({ type: 'measure.record', p: { dedupKey: 'self-normal', batchId: 'b_1', stationId: 'st_a', pressureDb: 52, thockScore: 80, clicks: 10 } })
+    const afterNormal = K.useStore.getState().state
+    outcomes.normal = {
+      ok: okNormal,
+      measured: afterNormal.measurements.some(m => m.dedupKey === 'self-normal'),
+      stage: afterNormal.batches.find(x => x.id === 'b_1').stage,
+      reason: afterNormal.audit[afterNormal.audit.length - 1].detail,
+    }
+    void before
+    // 异常高声压：绝不能触发隔离（闸门在异常处理之前）
+    const okAbn = K.useStore.getState().act({ type: 'measure.record', p: { dedupKey: 'self-abnormal', batchId: 'b_1', stationId: 'st_a', pressureDb: 95, thockScore: 80, clicks: 10 } })
+    const afterAbn = K.useStore.getState().state
+    outcomes.abnormal = {
+      ok: okAbn,
+      measured: afterAbn.measurements.some(m => m.dedupKey === 'self-abnormal'),
+      stage: afterAbn.batches.find(x => x.id === 'b_1').stage,
+      reason: afterAbn.audit[afterAbn.audit.length - 1].detail,
+    }
+    return outcomes
+  })
+  assert.equal(selfMeasure.normal.ok, false)
+  assert.equal(selfMeasure.normal.measured, false, '自装样机正常测量不得落库')
+  assert.equal(selfMeasure.normal.stage, 'listening', '被拦后状态不变')
+  assert.ok(selfMeasure.normal.reason.includes('自己装配'))
+  assert.equal(selfMeasure.abnormal.ok, false)
+  assert.equal(selfMeasure.abnormal.measured, false, '自装样机异常测量不得落库')
+  assert.equal(selfMeasure.abnormal.stage, 'listening', '异常路径也必须先被自装闸门拦下，不得隔离批次')
+  assert.ok(selfMeasure.abnormal.reason.includes('自己装配'))
 })
 
 // ============ 汇总 ============

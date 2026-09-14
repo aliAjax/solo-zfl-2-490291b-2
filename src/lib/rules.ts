@@ -40,10 +40,43 @@ function overlaps(aStart: string, aEnd: string, bStart: string, bEnd: string) {
   return new Date(aStart) < new Date(bEnd) && new Date(bStart) < new Date(aEnd)
 }
 
+/**
+ * 严格公历解析：只接受 ISO-8601（Z/偏移或本地）或纯日期，
+ * 并把结果按“声明时区”回算到年月日，拒绝 2/30、非闰年 2/29、13 月等被 JS 静默滚算的日子。
+ */
+const ISO_RE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:?\d{2})?)?$/
+
 export function parseDate(value: unknown): Date | null {
-  if (typeof value !== 'string' || value.trim() === '') return null
-  const d = new Date(value)
-  return Number.isNaN(d.getTime()) ? null : d
+  if (typeof value !== 'string') return null
+  const v = value.trim()
+  if (v === '') return null
+  const m = v.match(ISO_RE)
+  if (!m) return null
+  const [, y, mo, d, h, mi, , tz] = m
+  const date = new Date(v)
+  if (Number.isNaN(date.getTime())) return null
+
+  let wall: Date
+  if (tz && tz !== 'Z') {
+    const t = tz.replace(':', '')
+    const sign = t[0] === '-' ? -1 : 1
+    const offMin = sign * (Number(t.slice(1, 3)) * 60 + Number(t.slice(3, 5)))
+    wall = new Date(date.getTime() + offMin * 60000)
+  } else if (h !== undefined && !tz) {
+    wall = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+  } else {
+    wall = date
+  }
+
+  const sameDay =
+    wall.getUTCFullYear() === Number(y) &&
+    wall.getUTCMonth() + 1 === Number(mo) &&
+    wall.getUTCDate() === Number(d)
+  if (!sameDay) return null
+  if (h !== undefined && (wall.getUTCHours() !== Number(h) || wall.getUTCMinutes() !== Number(mi)))
+    return null
+  return date
 }
 
 export interface BookingCandidateLike {
@@ -55,19 +88,37 @@ export interface BookingCandidateLike {
   end: string
 }
 
-/** 预约时段与引用完整性校验：坏日期 / 不存在实体一律给出原因 */
+/** 预约时段与引用完整性、装配关系与自装限制：逐条给出原因 */
 export function bookingValidationErrors(state: AppState, c: BookingCandidateLike): string[] {
   const reasons: string[] = []
   const start = parseDate(c.start)
   const end = parseDate(c.end)
-  if (!start) reasons.push('开始时间无效或无法解析')
-  if (!end) reasons.push('结束时间无效或无法解析')
+  if (!start) reasons.push('开始时间不是真实存在的公历时刻（拒绝如 2 月 30 日、非闰年 2 月 29 日）')
+  if (!end) reasons.push('结束时间不是真实存在的公历时刻（拒绝如 2 月 30 日、非闰年 2 月 29 日）')
   if (start && end && end <= start) reasons.push('结束时间必须晚于开始时间')
-  if (!state.batches.some((b) => b.id === c.batchId)) reasons.push('批次不存在')
-  if (!state.prototypes.some((p) => p.id === c.prototypeId)) reasons.push('样机不存在')
+
+  const batch = state.batches.find((b) => b.id === c.batchId)
+  const prototype = state.prototypes.find((p) => p.id === c.prototypeId)
+  if (!batch) reasons.push('批次不存在')
+  if (!prototype) reasons.push('样机不存在')
   if (!state.stations.some((st) => st.id === c.stationId)) reasons.push('机位不存在')
-  if (!state.users.some((u) => u.id === c.testerId && u.role === 'tester'))
+  const tester = state.users.find((u) => u.id === c.testerId)
+  if (!tester || tester.role !== 'tester')
     reasons.push('测试员不存在或不是测试员角色')
+
+  // 批次与样机必须属于同一装配关系（同一轴体批次），不能只查编号存在
+  if (batch && prototype) {
+    if (batch.prototypeId !== prototype.id) {
+      reasons.push(`批次与样机不属于同一装配关系：批次装配的是 ${batch.prototypeId}，而所选样机为 ${prototype.id}`)
+    } else if (batch.switchBatchId !== prototype.switchBatchId) {
+      reasons.push('批次与样机的轴体批次不一致，装配关系不成立')
+    }
+  }
+
+  // 测试员不能预约自己装配的样机
+  if (prototype && tester && tester.role === 'tester' && prototype.assembledBy === tester.id) {
+    reasons.push('测试员不能预约自己装配的样机（利益冲突）')
+  }
   return reasons
 }
 
@@ -118,6 +169,9 @@ export function measurementBlockers(
   else if (!station.calibrated) reasons.push('测量机位未校准')
   if (!state.users.some((u) => u.id === p.testerId && u.role === 'tester'))
     reasons.push('测试员不存在或不是测试员角色')
+  // 测试员不能测量自己装配的样机（覆盖正常测量与声压异常隔离路径，因为闸门先于异常处理）
+  if (isSelfAssembled(state, b.prototypeId, p.testerId))
+    reasons.push('测试员不能测量自己装配的样机（利益冲突）')
   const hasBooking = state.bookings.some(
     (bk) => bk.batchId === p.batchId && bk.stationId === p.stationId && bk.testerId === p.testerId,
   )

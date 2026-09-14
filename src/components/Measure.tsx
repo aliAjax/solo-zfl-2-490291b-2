@@ -18,7 +18,6 @@ export function MeasureView() {
   const [reason, setReason] = useState('复测听感仍有沙音')
 
   const abnormal = isAnomalous({ pressureDb: Number(pressureDb) })
-  const station = s.stations.find((x) => x.id === stationId)
   const alreadySeen = s.dedup[dedupKey] !== undefined
   const gate = measurementBlockers(s, { batchId, stationId, testerId: actor?.id ?? '' })
 
